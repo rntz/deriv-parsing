@@ -1,6 +1,6 @@
 #lang racket
 
-(require "util.rkt")
+(require "util.rkt") ;; TODO?: stop using this
 
 ;; ==================== Utilities ====================
 
