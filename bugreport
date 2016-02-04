@@ -30,7 +30,7 @@ is-null? to at-most-null?, and have the *new* is-null? call nullable? as well:
     (define/fix (at-most-null? l)
       #:bottom #t
       (match l
-        [(empty)           #f]
+        [(empty)           #t]
         [(eps)             #t]
         [(token _ _)       #f]
         [(orp l1 l2)       (and (at-most-null? l1)  (at-most-null? l2))]
