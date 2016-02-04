@@ -1,0 +1,38 @@
+in dparse.rkt, is-null? has a bug. here's the code for is-null?:
+
+    (define/fix (is-null? l)
+      #:bottom #t
+      (match l
+        [(empty)           #f]
+        [(eps)             #t]
+        [(token _ _)       #f]
+        [(orp l1 l2)       (and (is-null? l1)  (is-null? l2))]
+        [(seqp l1 l2)      (and (is-null? l1)  (is-null? l2))]
+        [(redp l1 _)       (is-null? l1)]))
+
+Now consider the following:
+
+    (define foo (cat foo foo))
+
+foo does not accept any string, not even the empty string. Yet (is-null? foo)
+reports #t.
+
+Of course, changing #:bottom to #f doesn't fix things: now consider
+
+    (define foo (alt (eps) (cat foo foo)))
+
+foo *is* null, containing only the empty string.
+
+I have a fix for this, which I think works. I rename your implementation of
+is-null? to at-most-null?, and have the *new* is-null? call nullable? as well:
+
+    (define (is-null? l) (and (nullable? l) (at-most-null? l)))
+    (define/fix (at-most-null? l)
+      #:bottom #t
+      (match l
+        [(empty)           #f]
+        [(eps)             #t]
+        [(token _ _)       #f]
+        [(orp l1 l2)       (and (at-most-null? l1)  (at-most-null? l2))]
+        [(seqp l1 l2)      (and (at-most-null? l1)  (at-most-null? l2))]
+        [(redp l1 _)       (at-most-null? l1)]))
