@@ -1,0 +1,11 @@
+--2016-02-05 13:54:06--  http://www.wtfpl.net/txt/copying/
+Resolving www.wtfpl.net (www.wtfpl.net)... 193.200.42.162, 2001:67c:1740:9004::c1c8:2aa2
+Connecting to www.wtfpl.net (www.wtfpl.net)|193.200.42.162|:80... connected.
+HTTP request sent, awaiting response... 200 OK
+Length: 498 [text/plain]
+Saving to: ‘index.html’
+
+     0K                                                       100%  121M=0s
+
+2016-02-05 13:54:07 (121 MB/s) - ‘index.html’ saved [498/498]
+

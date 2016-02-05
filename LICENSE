@@ -1,0 +1,15 @@
+dparse-orig.rkt and dparse.rkt are rewrites of Matt Mights' dparse.rkt, which
+you can find here:
+http://matt.might.net/articles/parsing-with-derivatives/code/dparse.rkt
+
+Matt Might has released it under the CRAPL:
+http://matt.might.net/articles/crapl/
+
+I guess that means my modifications to it are CRAPLed too? Honestly I don't know
+much about licensing.
+
+My own stuff (everything else) is licensed under the WTFPL. If you wanna use
+it, just go ahead. Don't be an asshole (that's not legally binding).
+
+You can find the contents of the CRAPL & WTFPL licenses in the correspondingly
+named files.
