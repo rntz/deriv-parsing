@@ -1,8 +1,24 @@
 #lang racket
 
+;; This is my reimplementation of derivative parsing in Racket.
+
 (require "util.rkt") ;; TODO?: stop using this
 
 ;; ==================== Utilities ====================
+
+(define debug? (make-parameter #f))
+(define-syntax-rule (debug body ...) (when (debug?) body ...))
+
+;; delay/force are cool. what's even cooler is forcing delayed thunks by
+;; pattern-matching on them.
+(require (rename-in racket/promise [delay real-delay]))
+(define-match-expander delay
+  (syntax-parser [(_ p)      #'(? promise? (app force p))])
+  (syntax-parser [(_ e:expr) #'(real-delay e)]))
+
+;; Some simple contracts
+(define non-empty-set? (and/c set? (not/c set-empty?)))
+(define non-empty-list? (non-empty-listof any/c))
 
 ;; returns whether the (mutable) set already has the element.
 (define (set-add?! st v)
@@ -29,44 +45,69 @@
 ;; This maps a function `f' across the cartesian product of a list of sets,
 ;; producing a set of results.
 ;; `f' must accept N arguments, where N is the number of sets.
-(define (sets-map f sets)
+(define/contract (sets-map f sets)
+  (-> procedure? (listof set?) set?)
   (for/set ([x (sets-product sets)])
     (apply f x)))
 
-;; n-ary version of sets-map
-(define (set-map* f . sets) (sets-map f sets))
-
 
 ;; =============== Parser structures & constructors ===============
+
+;; A parser is either:
+;; - a promise returning a parser, or
+;; - a concrete parser (see below)
+(define parser? (or/c promise? (eta concrete-parser?)))
+
+;; NB. empty-parser? doesn't actually determine whether a parser is semantically
+;; empty; it's just a shallow shape check.
+(define empty-parser?     (match/c (p/union '())))
+(define non-empty-parser? (and/c parser? (not/c empty-parser?)))
+(define non-union-parser? (and/c parser? (not/c (eta p/union?))))
+
 (enum concrete-parser
-  ;; a recursive parser is a unique identifier plus a thunk that computes its
-  ;; body. TODO: implement this way of thinking about it
-  ;; (p-rec ident thunk)
-  (p-eps* results)
-  (p-lit tokens)
-  (p-one-of parsers)
-  (p-apply func parsers))
+  (p/tok    token)
+  (p/pure   [results non-empty-set?])
+  (p/union  [parsers (and/c (listof non-union-parser?)
+                            (not/c (list/c parser?)))])
+  ;; (p/map  func [parser non-empty-parser?])
+  ;; (p/cons [a non-empty-parser?] [b non-empty-parser?])
+  (p/apply  func [parsers (non-empty-listof non-empty-parser?)]))
 
-(define parser? (or/c promise? concrete-parser?))
-(define parser/c (or/c (promise/c concrete-parser?) concrete-parser?))
+;; the empty parser is '()
+;; the null parser is  (p/pure _)
 
-(define (p-eps x) (p-eps* (set x)))
-(define (p-tok t) (p-lit (list t)))
-(define (p-or . ps) (p-one-of ps))
-(define p-empty (p-or))
+;; smart constructors, which perform some simplifications on-the-fly. these do
+;; NOT perform full compaction. I'm not yet sure how to do that properly.
+(define p-tok p/tok)
+(define p-empty (p/union '()))
+(define (p-pure s) (if (set-empty? s) p-empty (p/pure s)))
+(define (p-union ps)
+  ;; flattens nested p-unions, which also drops unnecessary p-emptys.
+  (define/match (parser->list p)
+    [((p/union l)) l]
+    [(x) (list x)])
+  (match (append-map parser->list ps)
+    ;; a union of one thing is just that thing.
+    [(list p) p]
+    [ps (p/union ps)]))
+(define (p-apply f parsers)
+  (match parsers
+    ;; if any argument is empty, we are empty
+    [(list _ ... (? empty-parser?) _ ...) p-empty]
+    ;; if all arguments are provided, call the function
+    [(list (p/pure sets) ...) (p-pure (sets-map f sets))]
+    ;; function composition
+    [(list (p/apply g ps)) (p/apply (compose f g) ps)]
+    [_ (p/apply f parsers)]))
+
+;; convenient parser combinators.
+(define (p-eps x) (p-pure (set x)))
+(define (p-or . ps) (p-union ps))
 (define (p-map f . parsers) (p-apply f parsers))
 
 (define (p-first p . ps) (p-apply first (cons p ps)))
 (define (p-last p . ps) (p-apply last (cons p ps)))
 (define (p-list . ps) (p-apply list ps))
-
-
-;; =============== Running parsers ===============
-;; relies on functions defined below, under "Core parsing code"
-(define (parse p toks)
-  (match toks
-    ['() (parse-null p)]
-    [(cons tok toks) (parse (p-derive p tok) toks)]))
 
 
 ;; =============== Syntax sugar ===============
@@ -77,40 +118,57 @@
     [(_ e) (lang-parse #'e)]
     [(_ e ...) (lang-parse #'(begin e ...))]))
 
+;; TODO: let-syntax. x:expr syntax? ==> syntax?
 (define-for-syntax lang-parse
   (syntax-parser
-    #:datum-literals (eps pure quote ? empty escape -->)
+    #:datum-literals (pure eps quote ? empty fix escape -->)
     #:literals (begin0 begin or)
-    [e:id #'e]
-    [((~or eps pure) v ...) #'(p-eps* (set v ...))]
-    ;; TODO: maybe quote should be used for tokens?
-    ;; and '? should be used for class? dunno.
-    [(quote x) #'(p-tok 'x)]
+    [e:id                   #'e]
+    ;; recursive parsers. see fix/delay, below.
+    [(fix name p ...)       #'(fix/delay name (lang (or p  ...)))]
+    ;; literals/pure
+    [((~or eps pure) v ...) #'(p-pure (set v ...))]
+    [(~or x:boolean x:str x:char x:number) #'(p-eps x)]
+    ;; tokens
+    [(quote x)              #'(p-tok 'x)]
     ;; alternation
-    [empty          #'p-empty]
-    [(or p ...)     #'(p-or (lang p) ...)]
+    [empty                  #'p-empty]
+    [(or p ...)             #'(p-or (lang p) ...)]
     ;; sequencing
     [((~or begin begin0) p) #'(lang p)] ;optimization
     [(begin0 p0 p ...)      #'(p-first (lang p0) (lang p) ...)]
     [(begin p0 p ...)       #'(p-last (lang p0) (lang p) ...)]
-    ;; literals.
-    [(~or x:boolean x:str x:char x:number) #'(p-eps x)]
-    ;; function application. TODO: let-syntax.
-    [(f:id p ...)   #'(p-map f (lang p) ...)]
-    [(p ... --> f)  #'(p-map f (lang p) ...)]
+    ;; function application.
+    [(f:id p ...)           #'(p-map f (lang p) ...)]
+    [(p ... --> f)          #'(p-map f (lang p) ...)]
     ;; escape hatch
-    [(escape e)     #'e]))
+    [(escape e)             #'e]))
 
 (define-syntax-rule (fix/delay name body ...)
   (letrec ([name (delay body ...)]) name))
 
 (define-syntax-rule (define-rule name clauses ...)
-  (define name (fix/delay name body (lang (or clauses ...)))))
+  (define name (lang (fix name clauses ...))))
 
 
 ;; =============== Fixpoints & memoization ===============
 
 (require racket/splicing)
+
+(define-syntax-rule (define/memo (f x) body ...)
+  (splicing-let ([memo-table (make-weak-hasheq)]
+                 [computing  (make-parameter (set))])
+    (define (f x)
+      (define (compute)
+        (debug (printf "computing: (~a ~v)\n" 'f x))
+        (when (set-member? (computing) x)
+          (error "recursive call to memoized function"))
+        (parameterize ([computing (set-add (computing) x)])
+          body ...))
+      (debug
+       (when (hash-has-key? memo-table x)
+         (printf "cached:    (~a ~v) = ~v\n" 'f x (hash-ref memo-table x))))
+      (hash-ref! memo-table x compute))))
 
 ;; The evaluation strategy here could be smarter. This re-runs *every* node
 ;; until all nodes in the computation "settle". But some nodes may settle early!
@@ -140,57 +198,107 @@
        (f x))
      (hash-ref! cache x compute-fixpoint))))
 
-;; ;; A more HOF-flavored version:
-;;
-;; (define (fixify bottom meta-func)
-;;   (define cache     (make-weak-hasheq))
-;;   (define changed?  (make-parameter 'error-changed))
-;;   (define (compute-fixpoint argument)
-;;     (define visited (mutable-seteq))
-;;     (define (visit node)
-;;       (define cached (hash-ref cache node (lambda () bottom)))
-;;       ;; if we've already visited this node, give cached value
-;;       (if (set-add?! visited node) cached
-;;           ;; this is where we actually run the user-supplied code for the
-;;           ;; fix-point computation.
-;;           (let ([new-val (inner node)])
-;;             (unless (equal? new-val cached)
-;;               (changed? #t)
-;;               (hash-set! cache node new-val))
-;;             new-val)))
-;;     (define inner (meta-func visit))
-;;     (visit argument))
-;;   (lambda (x) (hash-ref! cache x (lambda () (compute-fixpoint x)))))
-;;
-;; (define-syntax-rule (define/fix- (f x) #:bottom bottom body ...)
-;;   (define f (fixify bottom (lambda (f) (lambda (x) body ...)))))
-
 
 ;; =============== Core parsing code ===============
 (define/fix (nullable? p)
   #:bottom #f
-  (match (force p)
-    [(p-eps* s)     (not (set-empty? s))]
-    [(p-lit l)      (null? l)]
-    [(p-one-of ps)  (ormap nullable? ps)]
-    [(p-apply _ ps) (andmap nullable? ps)]))
+  (match p
+    [(delay p)      (nullable? p)]
+    [(p/tok t)      #f]
+    [(p/pure s)     #t]
+    [(p/union ps)   (ormap nullable? ps)]
+    [(p/apply _ ps) (andmap nullable? ps)]))
 
 (define/fix (parse-null p)
   #:bottom (set)
-  (match (force p)
-    [(p-eps* s) s]
-    [(p-lit '()) (set '())]
-    [(p-lit _) (set)]
-    [(p-one-of ps) (set-unions (map parse-null ps))]
-    [(p-apply f ps) (sets-map f (map parse-null ps))]))
+  (match p
+    [(delay p)      (parse-null p)]
+    [(p/pure s)     s]
+    [(p/tok _)      (set)]
+    [(p/union ps)   (set-unions (map parse-null ps))]
+    [(p/apply f ps) (sets-map f (map parse-null ps))]))
 
-;; should also do compaction
-(define (p-derive p tok) TODO)
+(define/fix (is-empty? p)
+  #:bottom #t
+  (match p
+    [(delay p)      (is-empty? p)]
+    [(p/pure _)     #f]
+    [(p/tok _)      #f]
+    [(p/union ps)   (andmap is-empty? ps)]
+    [(p/apply f ps) (ormap is-empty? ps)]))
+
+(define/memo (compact p)
+  (match p
+    [(? is-empty?)      p-empty]
+    [(? promise?)       (delay (compact (force p)))]
+    [(p/pure _)         p]
+    [(p/tok _)          p]
+    ;; Our smart constructors do most of the work for us.
+    [(p/union ps)       (p-union (map compact ps))]
+    [(p/apply f ps)     (p-apply f (map compact ps))]))
+
+(define (derive c p) ((derivative p) c))
+(define/memo (derivative p)
+  (lambda (c)
+    (match p
+      ;; this delay is critical to avoid infinite looping.
+      [(? promise?)   (delay (derive c (force p)))]
+      [(p/pure _)     p-empty]
+      [(p/tok (== c)) (p-eps c)]
+      [(p/tok _)      p-empty]
+      [(p/union ps)   (p-union (map (curry derive c) ps))]
+      [(p/apply f ps)
+       (define nulls  (map parse-null ps))
+       (define derivs (map (curry derive c) ps))
+       (p-union
+        (for/list ([i (length ps)])
+          (define head (take nulls i))
+          ;; for some reason this check is... critical to avoiding
+          ;; infinite recursion?
+          ;;
+          ;; shit, even with it we're not safe.
+          (if (and #f (ormap set-empty? head)) p-empty
+              (let ()
+                (define tail (drop ps (+ 1 i)))
+                (p-apply f (append (map p-pure head)
+                                   (list (list-ref derivs i))
+                                   tail))))))])))
+
+;; does this work? I really can't imagine it does.
+;; problem: tests for when we are done using equal?
+;; wtf does equal? do on parsers? I don't know.
+(define/memo (derive-hash p)
+  (match p
+    ;; ok wtf do we do here.
+    [(delay p)   TODO]
+    [(p/pure _)  (hash)]
+    [(p/tok tok) (hash tok (p-eps 'tok))]
+    [(p/union ps)
+     (define hashes (map derive-hash ps))
+     (define (derivs-for tok)
+       (for/list ([h hashes] #:when (hash-has-key? h tok))
+         (hash-ref h tok)))
+     (for/hash ([tok (set-unions (map hash-key-set hashes))])
+       (values tok (p-union (derivs-for tok))))]
+    [(p/apply f ps) TODO]))
+
+
+;; =============== Running parsers ===============
+(define (parse p toks)
+  (match toks
+    ['() (parse-null p)]
+    [(cons tok toks) (parse (derive tok p) toks)]))
 
 
 ;; =============== Reverse parsing ===============
 ;; That is: generating strings from parsers!
-(struct trie (null-parses out-parses) #:transparent)
+(struct trie (parses children) #:transparent)
 
 
 ;; =============== Test cases ===============
+(define-rule self self)
+(define-rule infsum infsum infsum)
+(define-rule inflist (list inflist inflist))
+
+(define-rule nat 'z (list 's nat))
+(define-rule zs (eps '()) (cons 'z tan))
