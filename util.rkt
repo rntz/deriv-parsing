@@ -7,7 +7,7 @@
 (provide
   define-syntax-parser TODO fn exception match? match/c enum enum-case enum/c
   ;; re-export
-  (for-syntax syntax-parse syntax-parser))
+  (for-syntax (all-from-out syntax/parse)))
 
 (define-syntax define-syntax-parser
   (syntax-parser
@@ -39,6 +39,18 @@
         [(c.pattern) c.body ...]
         ...)])
 
+;;;; pattern matching ;;;;
+(begin-for-syntax
+  (define-splicing-syntax-class match-branch
+    (pattern (~seq pattern #:when condition))
+    (pattern pattern #:attr condition #'#t)))
+
+(define-syntax-parser (match? e p:match-branch ...)
+  #'(match e [p.pattern #:when p.condition #t] ... [_ #f]))
+
+(define-syntax-rule (match/c pattern ...)
+  (lambda (x) (match? x pattern ...)))
+
 ;;;; exceptions ;;;;
 (define-for-syntax (format-id fmt id)
   (datum->syntax id (string->symbol (format fmt (syntax->datum id)))))
@@ -55,18 +67,6 @@
           #:extra-constructor-name make-exn:name)
         (define (raise-name message)
           (raise (make-exn:name message (current-continuation-marks))))))])
-
-;;;; pattern matching ;;;;
-(begin-for-syntax
-  (define-splicing-syntax-class match-branch
-    (pattern (~seq pattern #:when condition))
-    (pattern pattern #:attr condition #'#t)))
-
-(define-syntax-parser (match? e p:match-branch ...)
-  #'(match e [p.pattern #:when p.condition #t] ... [_ #f]))
-
-(define-syntax-rule (match/c pattern ...)
-  (lambda (x) (match? x pattern ...)))
 
 
 ;;; Enumeration types ;;;
@@ -101,7 +101,7 @@
 
 
 ;;; Miscellaneous utilities ;;;
-(provide assert! warn! flip print-error
+(provide assert! warn! flip print-error eta
          index-of length=? map? foldl1 foldr1 rev-append
          read-file)
 
@@ -110,6 +110,9 @@
 
 (define (warn! msg)
   (displayln (format "WARNING: ~a" msg)) )
+
+(define-syntax-rule (eta e)
+  (lambda args (apply e args)))
 
 (define ((flip f) x y)
   (f y x))
@@ -181,6 +184,7 @@
 
 (define (freeze-set s) (for/set ([x s]) x))
 
+;; TODO?: rename to sets-union, sets-intersect?
 (define (set-unions sets)
   ;;(let*/set ([s sets]) s)
   (if (null? sets) (set) (apply set-union sets)))
