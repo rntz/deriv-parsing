@@ -262,47 +262,29 @@
     [(token pred class) (if (pred c) (eps* (set c)) (empty))]
     [(orp l1 l2) (alt (parse-derive c l1)
                       (parse-derive c l2))]
+    [(redp l f) (red (parse-derive c l) f)]
+
+    ;; apparently the nullability check is critical to not looping!
     [(seqp (and (nullablep?) l1) l2)
      (alt (cat (eps* (parse-null l1)) (parse-derive c l2))
           (cat (parse-derive c l1) l2))]
 
-    [(seqp l1 l2) (cat (parse-derive c l1) l2)]
-
-    [(redp l f) (red (parse-derive c l) f)]))
+    [(seqp l1 l2) (cat (parse-derive c l1) l2)]))
 
 ; Derivative of a context-free language:
 (define/memoize (derive c l)
   #:order ([l #:eq] [c #:equal])
   (match l
-    [(empty)
-     ; =>
-     (empty)]
-
-    [(eps)
-     ; =>
-     (empty)]
-
-    [(token pred class)
-     ; =>
-     (if (pred c) (eps) (empty))]
-
-    [(orp l1 l2)
-     ; =>
-     (alt (derive c l1)
-          (derive c l2))]
-
+    [(empty) (empty)]
+    [(eps) (empty)]
+    [(token pred class) (if (pred c) (eps) (empty))]
+    [(orp l1 l2) (alt (derive c l1)
+                      (derive c l2))]
     [(seqp (and (nullablep?) l1) l2)
-     ; =>
      (alt (derive c l2)
           (cat (derive c l1) l2))]
-
-    [(seqp l1 l2)
-     ; =>
-     (cat (derive c l1) l2)]
-
-    [(redp l f)
-     ; =>
-     (derive c l)]))
+    [(seqp l1 l2) (cat (derive c l1) l2)]
+    [(redp l f) (derive c l)]))
 
 ; Recognizes if a string is in a language:
 (define (recognizes? l s)
@@ -345,16 +327,33 @@
     [(not (stream-null? s1))             (pull-s1)]
     [else                                stream-null]))
 
-; Checks whether a language is the empty string:
-(define/fix (is-null? l)
+;; this is Might's original code for is-null? It is buggy. Consider:
+;;     (define foo (cat foo foo))
+;; the below implementation of is-null? will report (is-null? foo) = #t.
+
+;; ; Checks whether a language is the empty string:
+;; (define/fix (is-null? l)
+;;   #:bottom #t
+;;   (match l
+;;     [(empty)           #f]
+;;     [(eps)             #t]
+;;     [(token _ _)       #f]
+;;     [(orp l1 l2)       (and (is-null? l1)  (is-null? l2))]
+;;     [(seqp l1 l2)      (and (is-null? l1)  (is-null? l2))]
+;;     [(redp l1 _)       (is-null? l1)]))
+
+;; This is my revised implementation of is-null?
+;; - rntz
+(define (is-null? l) (and (nullable? l) (at-most-null? l)))
+(define/fix (at-most-null? l)
   #:bottom #t
   (match l
-    [(empty)           #f]
+    [(empty)           #t]
     [(eps)             #t]
     [(token _ _)       #f]
-    [(orp l1 l2)       (and (is-null? l1)  (is-null? l2))]
-    [(seqp l1 l2)      (and (is-null? l1)  (is-null? l2))]
-    [(redp l1 _)       (is-null? l1)]))
+    [(orp l1 l2)       (and (at-most-null? l1)  (at-most-null? l2))]
+    [(seqp l1 l2)      (and (at-most-null? l1)  (at-most-null? l2))]
+    [(redp l1 _)       (at-most-null? l1)]))
 
 (define-match-expander nullp
   (syntax-rules ()
@@ -401,6 +400,9 @@
     [(nullp)       (eps* (parse-null l))]
     [(token p c)   l]
 
+    ;; this line is made unnecessary by the check for (emptyp), above. if we
+    ;; removed that, this would be necessary to avoid infinite recursion.
+    ; [(orp (emptyp) (emptyp)) (empty)]
     [(orp (emptyp) l2)  (compact l2)]
     [(orp l1 (emptyp))  (compact l1)]
 
@@ -408,22 +410,18 @@
     [(seqp l1 (nullp t))  (red (compact l1) (lambda (w1) (cons w1 t)))]
 
     [(orp l1 l2)   (alt (compact l1) (compact l2))]
+    [(seqp (emptyp) _) (empty)]
     [(seqp l1 l2)  (cat (compact l1) (compact l2))]
 
     [(redp (emptyp) _)  (empty)]
 
     [(redp (and e (nullp)) f)
-     ; =>
      (eps* (for/set ([t (parse-null e)]) (f t)))]
 
     [(redp (seqp (nullp t) l2) f)
-     ; =>
      (red (compact l2) (lambda (w2) (f (cons t w2))))]
 
-    [(redp (redp l f) g)
-     ; =>
-     (red (compact l) (compose g f))]
-
+    [(redp (redp l f) g) (red (compact l) (compose g f))]
     [(redp l f)    (red (compact l) f)]))
 
 
