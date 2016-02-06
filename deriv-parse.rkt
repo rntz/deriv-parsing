@@ -160,20 +160,44 @@
 
 (require racket/splicing)
 
-(define-syntax-rule (define/memo (f x) body ...)
-  (splicing-let ([memo-table (make-weak-hasheq)]
-                 [computing  (make-parameter (set))])
-    (define (f x)
-      (define (compute)
-        (debug (printf "computing: (~a ~v)\n" 'f x))
-        (when (set-member? (computing) x)
-          (error "recursive call to memoized function"))
-        (parameterize ([computing (set-add (computing) x)])
-          body ...))
-      (debug
-       (when (hash-has-key? memo-table x)
-         (printf "cached:    (~a ~v) = ~v\n" 'f x (hash-ref memo-table x))))
-      (hash-ref! memo-table x compute))))
+;; why is it "define/memo!", you ask, and not simply "define/memo"?
+;; because it has a side effect! for example,
+;;
+;;     (define/memo! (foo x) ...)
+;;     (define (bar x) (foo x))
+;;
+;; is NOT the same as:
+;;
+;;     (define (bar x)
+;;       (define/memo! (foo x) ...)
+;;       (foo x))
+;;
+;; The case of define/memo that implements multi-argument memoization via
+;; currying used to have a bug caused by this very difference!
+(define-syntax-parser define/memo!
+  [(_ (f x) body ...)
+   #'(splicing-let ([memo-table (make-weak-hasheq)]
+                    [computing  (make-parameter (set))])
+       (define (f x)
+         (define (compute)
+           (debug (printf "computing: (~a ~v)\n" 'f x))
+           (when (set-member? (computing) x)
+             (error "recursive call to memoized function"))
+           (parameterize ([computing (set-add (computing) x)])
+             body ...))
+         (debug
+          (when (hash-has-key? memo-table x)
+            (printf "cached:    (~a ~v) = ~v\n" 'f x (hash-ref memo-table x))))
+         (hash-ref! memo-table x compute)))]
+
+  ;; for 2 or more arguments, we use a (simple trick / awful hack): currying!
+  [(_ (f x y ...) body ...)
+   #'(begin
+       (define/memo! (outer x)
+         (define/memo! (inner y ...) body ...)
+         inner)
+       (define (f x y ...)
+         ((outer x) y ...)))])
 
 ;; The evaluation strategy here could be smarter. This re-runs *every* node
 ;; until all nodes in the computation "settle". But some nodes may settle early!
@@ -232,7 +256,7 @@
     [(p/union ps)   (andmap is-empty? ps)]
     [(p/apply f ps) (ormap is-empty? ps)]))
 
-(define/memo (compact p)
+(define/memo! (compact p)
   (match p
     [(? is-empty?)      p-empty]
     [(? promise?)       (delay (compact (force p)))]
@@ -242,31 +266,25 @@
     [(p/union ps)       (p-union (map compact ps))]
     [(p/apply f ps)     (p-apply f (map compact ps))]))
 
-
-;; bleh, we need to nest define/memo in order to tie the knot properly.
-;; I guess this is why dparse.rkt has that weak-hash-trie stuff.
-(define (derive c p) ((deriver-for c) p))
-(define/memo (deriver-for c)
-  (define/memo (derivative p)
-    (match p
-      ;; this delay is critical to avoid infinite looping.
-      [(? promise?)   (delay (derivative (force p)))]
-      [(p/pure _)     (const p-empty)]
-      [(p/tok (== c)) (p-eps c)]
-      [(p/tok _)      p-empty]
-      [(p/union ps)   (p-union (map derivative ps))]
-      [(p/apply f ps)
-       (define nulls  (map parse-null ps))
-       (define derivs (map derivative ps))
-       (p-union
-        ;; NB. could be more efficient about noticing empty null-sets here.
-        (for/list ([i (length ps)])
-          (define head (take nulls i))
-          (define tail (drop ps (+ 1 i)))
-          (p-apply f (append (map p-pure head)
-                             (list (list-ref derivs i))
-                             tail))))]))
-  derivative)
+(define/memo! (derive c p)
+  (match p
+    ;; this delay is critical to avoid infinite looping.
+    [(? promise?)   (delay (derive c (force p)))]
+    [(p/pure _)     p-empty]
+    [(p/tok (== c)) (p-eps c)]
+    [(p/tok _)      p-empty]
+    [(p/union ps)   (p-union (map (curry derive c) ps))]
+    [(p/apply f ps)
+     (define nulls  (map parse-null       ps))
+     (define derivs (map (curry derive c) ps))
+     (p-union
+      ;; NB. could be more efficient about noticing empty null-sets here.
+      (for/list ([i (length ps)])
+        (define head (take nulls i))
+        (define tail (drop ps (+ 1 i)))
+        (p-apply f (append (map p-pure head)
+                           (list (list-ref derivs i))
+                           tail))))]))
 
 ;; finds the set of tokens which lead to non-empty derivatives.
 (define/fix (next-tokens p)
