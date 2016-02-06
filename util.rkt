@@ -1,14 +1,14 @@
 #lang racket
 
 (require racket (for-syntax syntax/parse))
+;; re-export syntax/parse, it's fantastic.
+(provide (for-syntax (all-from-out syntax/parse)))
 
 
-;;; Syntax utilities ;;;
-(provide
-  define-syntax-parser TODO fn exception match? match/c enum enum-case enum/c
-  ;; re-export
-  (for-syntax (all-from-out syntax/parse)))
+;;; Syntax manipulation utilities
+(provide define-syntax-parser (for-syntax format-id))
 
+(provide define-syntax-parser)
 (define-syntax define-syntax-parser
   (syntax-parser
     [(_ name:id (pattern body ...) ...)
@@ -20,10 +20,13 @@
       #'(define-syntax-parser name
           [(_ pattern ...) body ...])]))
 
-(define-syntax-parser TODO
-  [_:id #'(error "TODO: unimplemented")])
+(provide (for-syntax format-id))
+(define-for-syntax (format-id fmt id)
+  (datum->syntax id (string->symbol (format fmt (syntax->datum id)))))
 
-;;;; function definitions ;;;;
+
+;;; Defining functions
+(provide fn)
 (begin-for-syntax
   (define-syntax-class fn-clause
     (pattern ((param ...) body ...)
@@ -39,7 +42,9 @@
         [(c.pattern) c.body ...]
         ...)])
 
-;;;; pattern matching ;;;;
+
+;;; Pattern matching
+(provide match? match/c)
 (begin-for-syntax
   (define-splicing-syntax-class match-branch
     (pattern (~seq pattern #:when condition))
@@ -51,9 +56,10 @@
 (define-syntax-rule (match/c pattern ...)
   (lambda (x) (match? x pattern ...)))
 
-;;;; exceptions ;;;;
-(define-for-syntax (format-id fmt id)
-  (datum->syntax id (string->symbol (format fmt (syntax->datum id)))))
+
+;;; Exceptions
+;;; TODO?: remove this, unused?
+(provide exception)
 
 (define-syntax-parser exception
   [(_ name) #'(exception name exn:fail)]
@@ -69,7 +75,9 @@
           (raise (make-exn:name message (current-continuation-marks))))))])
 
 
-;;; Enumeration types ;;;
+;;; Enumeration types
+(provide enum enum-case enum/c)
+
 (define-syntax-rule (enum name branch ...)
   (begin
     ;; we hide the constructor by giving it a name that we weren't passed
@@ -100,10 +108,11 @@
   (or/c (struct/c name arg/c ...) ...))
 
 
-;;; Miscellaneous utilities ;;;
-(provide assert! warn! flip print-error eta
-         index-of length=? map? foldl1 foldr1 rev-append
-         read-file)
+;;; Miscellaneous utilities
+(provide TODO assert! warn! flip print-error eta read-file)
+
+(define-syntax-parser TODO
+  [_:id #'(error "TODO: unimplemented")])
 
 (define (assert! t)
   (unless t (error "ASSERTION FAILURE")))
@@ -119,6 +128,17 @@
 
 (define (print-error err)
   (printf "error: ~a\n" (exn-message err)))
+
+(define (read-file filename)
+  (with-input-from-file filename
+    (lambda ()
+      (let loop ([line (read)] [acc '()])
+        (if (eof-object? line)
+            (reverse acc)
+            (loop (read) (cons line acc)))))))
+
+;;; List utilities
+(provide index-of length=? map? foldl1 foldr1 rev-append)
 
 (define (index-of v lst)
   (let loop ([i 0] [l lst])
@@ -142,20 +162,13 @@
 (define (rev-append x y)
   (append (reverse x) y))
 
-(define (read-file filename)
-  (with-input-from-file filename
-    (lambda ()
-      (let loop ([line (read)] [acc '()])
-        (if (eof-object? line)
-            (reverse acc)
-            (loop (read) (cons line acc)))))))
-
 
-;;; stream and generator utilities ;;;
+;;; Stream and generator utilities
 (require racket/generator)
+(provide (all-from-out racket/generator))
 (provide stream-take stream-append-lazy streams-interleave
-  (all-from-out racket/generator)
-  for/generator for/stream generate/stream generate/list for/generate/list)
+         for/generator for/stream generate/stream generate/list
+         for/generate/list)
 
 (define (stream-take n s)
   (for/list ([x (in-stream s)]
@@ -175,6 +188,7 @@
              (stream-map stream-first ss)
              (lambda () (streams-interleave (map stream-rest ss))))]))
 
+;; TODO?: cut these down to just the ones I actually use.
 (define-syntax-rule (for/generator clauses body ...)
   (in-generator (for clauses (yield (begin body ...)))))
 (define-syntax-rule (for/stream clauses body ...)
@@ -187,39 +201,34 @@
   (generate/list (for clauses body ...)))
 
 
-;;; set utilities ;;;
-(provide freeze-set set-unions set-intersects set-filter)
+;;; Set utilities
+(provide freeze-set sets-union sets-intersect set-filter)
 
 (define (freeze-set s) (for/set ([x s]) x))
-
-;; TODO?: rename to sets-union, sets-intersect?
-(define (set-unions sets)
-  ;;(let*/set ([s sets]) s)
-  (if (null? sets) (set) (apply set-union sets)))
-
-(define (set-intersects sets)
-  (apply set-intersect sets))
-
-(define (set-filter p s)
-  (for/set ([x s] #:when (p x)) x))
+(define (sets-union sets)     (apply set-union (set) sets))
+(define (sets-intersect sets) (apply set-intersect sets))
+(define (set-filter p s) (for/set ([x s] #:when (p x)) x))
 
 
-;;; hash utilities ;;;
-(provide freeze-hash hash-union-with hash-union-right hash-unions-right
-         hash-intersection-with hash-filter-keys hash-select-keys
-         hash-map-values hash-key-set)
+;;; Hash utilities
+(provide freeze-hash
+         hash-union-with hash-union-right hashes-union-right
+         hash-intersection-with
+         hash-filter-keys ;; hash-select-keys
+         hash-keyset hash-map-vals)
 
 (define (freeze-hash h) (for/hash ([(k v) h]) (values k v)))
 
 (define (hash-filter-keys p h)
   (for/hash ([(k v) h] #:when (p k)) (values k v)))
 
-(define (hash-select-keys h k)
-  (hash-filter-keys (curry set-member? (for/set ([x k]) x)) h))
+;; TODO: remove if unused.
+;; (define (hash-select-keys h k)
+;;   (hash-filter-keys (curry set-member? (for/set ([x k]) x)) h))
 
-(define (hash-key-set h) (list->set (hash-keys h)))
+(define (hash-keyset h) (list->set (hash-keys h)))
 
-(define (hash-map-values f h)
+(define (hash-map-vals f h)
   (for/hash ([(k v) h])
     (values k (f v))))
 
@@ -234,7 +243,7 @@
           (f (dict-ref a k) (dict-ref b k)))))))
 
 (define (hash-union-right a b) (hash-union-with a b (lambda (x y) y)))
-(define (hash-unions-right hs) (foldl hash-union-right (hash) hs))
+(define (hashes-union-right hs) (foldl hash-union-right (hash) hs))
 
 (define (hash-intersection-with a b f)
   (for/hash ([k (in-dict-keys a)]
@@ -242,7 +251,7 @@
     (f (dict-ref a k) (dict-ref b k))))
 
 
-;;; racket 6.2 compatibility shims. ;;;
+;;; Racket 6.2 to 6.3 compatibility shims
 (define-syntax-parser static-when
   [(_ condition body ...)
    (if (eval #'condition)

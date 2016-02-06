@@ -38,7 +38,7 @@
     (match sets
       ['() (set acc)]
       [(cons s sets)
-       (set-unions
+       (sets-union
         (for/list ([elem s])
           (loop sets (cons elem acc))))])))
 
@@ -220,7 +220,7 @@
     [(delay p)      (parse-null p)]
     [(p/pure s)     s]
     [(p/tok _)      (set)]
-    [(p/union ps)   (set-unions (map parse-null ps))]
+    [(p/union ps)   (sets-union (map parse-null ps))]
     [(p/apply f ps) (sets-map f (map parse-null ps))]))
 
 (define/fix (is-empty? p)
@@ -259,15 +259,13 @@
        (define nulls  (map parse-null ps))
        (define derivs (map derivative ps))
        (p-union
+        ;; NB. could be more efficient about noticing empty null-sets here.
         (for/list ([i (length ps)])
           (define head (take nulls i))
-          ;; TODO: is this check useful? can I just rip it out entirely?
-          (if (and #f (ormap set-empty? head)) p-empty
-              (let ()
-                (define tail (drop ps (+ 1 i)))
-                (p-apply f (append (map p-pure head)
-                                   (list (list-ref derivs i))
-                                   tail))))))]))
+          (define tail (drop ps (+ 1 i)))
+          (p-apply f (append (map p-pure head)
+                             (list (list-ref derivs i))
+                             tail))))]))
   derivative)
 
 ;; finds the set of tokens which lead to non-empty derivatives.
@@ -277,12 +275,12 @@
     [(delay p)      (next-tokens p)]
     [(p/pure _)     (set)]
     [(p/tok t)      (set t)]
-    [(p/union ps)   (set-unions (map next-tokens ps))]
+    [(p/union ps)   (sets-union (map next-tokens ps))]
     [(p/apply f ps)
      ;; find all nullable prefixes of ps.
      (define-values (head tail) (splitf-at ps nullable?))
      (define nexts (if (null? tail) head (cons (car tail) head)))
-     (set-unions (map next-tokens nexts))]))
+     (sets-union (map next-tokens nexts))]))
 
 (define (derive-hash p)
   (for/hash ([c (next-tokens p)])
