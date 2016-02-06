@@ -153,7 +153,7 @@
 
 ;;; stream and generator utilities ;;;
 (require racket/generator)
-(provide stream-take stream-append-lazy
+(provide stream-take stream-append-lazy streams-interleave
   (all-from-out racket/generator)
   for/generator for/stream generate/stream generate/list for/generate/list)
 
@@ -164,8 +164,16 @@
 
 (define (stream-append-lazy stream stream-thunk)
   (if (stream-empty? stream) (stream-thunk)
-    (stream-cons (stream-first stream)
-      (stream-append-lazy (stream-rest stream stream-thunk)))))
+      (stream-cons (stream-first stream)
+                   (stream-append-lazy (stream-rest stream) stream-thunk))))
+
+(define (streams-interleave streams)
+  (match (filter-not stream-empty? streams)
+    ['()    empty-stream]
+    [`(,s)  s]
+    [ss     (stream-append-lazy
+             (stream-map stream-first ss)
+             (lambda () (streams-interleave (map stream-rest ss))))]))
 
 (define-syntax-rule (for/generator clauses body ...)
   (in-generator (for clauses (yield (begin body ...)))))
