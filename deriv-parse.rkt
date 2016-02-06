@@ -73,14 +73,17 @@
   ;; (p/cons [a non-empty-parser?] [b non-empty-parser?])
   (p/apply  func [parsers (non-empty-listof non-empty-parser?)]))
 
-;; the empty parser is '()
+;; the empty parser is (p/union '())
 ;; the null parser is  (p/pure _)
 
-;; smart constructors, which perform some simplifications on-the-fly. these do
-;; NOT perform full compaction. I'm not yet sure how to do that properly.
+;; smart constructors, which perform some simplifications (but not complete
+;; compaction) on-the-fly.
 (define p-tok p/tok)
 (define p-empty (p/union '()))
-(define (p-pure s) (if (set-empty? s) p-empty (p/pure s)))
+
+(define (p-pure s)
+  (if (set-empty? s) p-empty (p/pure s)))
+
 (define (p-union ps)
   ;; flattens nested p-unions, which also drops unnecessary p-emptys.
   (define/match (parser->list p)
@@ -90,7 +93,9 @@
     ;; a union of one thing is just that thing.
     [(list p) p]
     [ps (p/union ps)]))
-(define (p-apply f parsers)
+
+(define/contract (p-apply f parsers)
+  (-> procedure? (listof parser?) parser?)
   (match parsers
     ;; if any argument is empty, we are empty
     [(list _ ... (? empty-parser?) _ ...) p-empty]
@@ -237,50 +242,51 @@
     [(p/union ps)       (p-union (map compact ps))]
     [(p/apply f ps)     (p-apply f (map compact ps))]))
 
-(define (derive c p) ((derivative p) c))
-(define/memo (derivative p)
-  (lambda (c)
+
+;; bleh, we need to nest define/memo in order to tie the knot properly.
+;; I guess this is why dparse.rkt has that weak-hash-trie stuff.
+(define (derive c p) ((deriver-for c) p))
+(define/memo (deriver-for c)
+  (define/memo (derivative p)
     (match p
       ;; this delay is critical to avoid infinite looping.
-      [(? promise?)   (delay (derive c (force p)))]
-      [(p/pure _)     p-empty]
+      [(? promise?)   (delay (derivative (force p)))]
+      [(p/pure _)     (const p-empty)]
       [(p/tok (== c)) (p-eps c)]
       [(p/tok _)      p-empty]
-      [(p/union ps)   (p-union (map (curry derive c) ps))]
+      [(p/union ps)   (p-union (map derivative ps))]
       [(p/apply f ps)
        (define nulls  (map parse-null ps))
-       (define derivs (map (curry derive c) ps))
+       (define derivs (map derivative ps))
        (p-union
         (for/list ([i (length ps)])
           (define head (take nulls i))
-          ;; for some reason this check is... critical to avoiding
-          ;; infinite recursion?
-          ;;
-          ;; shit, even with it we're not safe.
+          ;; TODO: is this check useful? can I just rip it out entirely?
           (if (and #f (ormap set-empty? head)) p-empty
               (let ()
                 (define tail (drop ps (+ 1 i)))
                 (p-apply f (append (map p-pure head)
                                    (list (list-ref derivs i))
-                                   tail))))))])))
+                                   tail))))))]))
+  derivative)
 
-;; does this work? I really can't imagine it does.
-;; problem: tests for when we are done using equal?
-;; wtf does equal? do on parsers? I don't know.
-(define/memo (derive-hash p)
+;; finds the set of tokens which lead to non-empty derivatives.
+(define/fix (next-tokens p)
+  #:bottom (set)
   (match p
-    ;; ok wtf do we do here.
-    [(delay p)   TODO]
-    [(p/pure _)  (hash)]
-    [(p/tok tok) (hash tok (p-eps 'tok))]
-    [(p/union ps)
-     (define hashes (map derive-hash ps))
-     (define (derivs-for tok)
-       (for/list ([h hashes] #:when (hash-has-key? h tok))
-         (hash-ref h tok)))
-     (for/hash ([tok (set-unions (map hash-key-set hashes))])
-       (values tok (p-union (derivs-for tok))))]
-    [(p/apply f ps) TODO]))
+    [(delay p)      (next-tokens p)]
+    [(p/pure _)     (set)]
+    [(p/tok t)      (set t)]
+    [(p/union ps)   (set-unions (map next-tokens ps))]
+    [(p/apply f ps)
+     ;; find all nullable prefixes of ps.
+     (define-values (head tail) (splitf-at ps nullable?))
+     (define nexts (if (null? tail) head (cons (car tail) head)))
+     (set-unions (map next-tokens nexts))]))
+
+(define (derive-hash p)
+  (for/hash ([c (next-tokens p)])
+    (values c (derive c p))))
 
 
 ;; =============== Running parsers ===============
@@ -292,7 +298,37 @@
 
 ;; =============== Reverse parsing ===============
 ;; That is: generating strings from parsers!
+
+;; A trie's `parses' is a set of its null parses.
+;; A trie's `children' is a hash from tokens to promises that deliver tries.
 (struct trie (parses children) #:transparent)
+
+(define (parser->trie p)
+  (trie (parse-null p)
+        (for/hash ([(tok next) (derive-hash p)])
+          (values tok (delay (parser->trie next))))))
+
+;; forces a trie to the given depth.
+;; pun unintentional, I swear. really! you don't believe me?!
+(define (trie-force t #:depth [depth #f])
+  (if (equal? depth 0) t
+      (match-let ([(trie parses children) (force t)])
+        (trie parses
+              (for/hash ([(tok next) children])
+                (values tok
+                        (trie-force next #:depth (and depth (- depth 1)))))))))
+
+;; generates a stream of (token-list . set-of-parses) pairs.
+(define (all-parses p)
+  (let loop ([p p] [rev-tokens '()])
+    (define (next)
+      (streams-interleave
+       (for/list ([(tok next) (derive-hash p)])
+         (loop next (cons tok rev-tokens)))))
+    (define parses (parse-null p))
+    (if (set-empty? parses)
+        (next)
+        (stream-cons (cons (reverse rev-tokens) parses) (next)))))
 
 
 ;; =============== Test cases ===============
@@ -301,4 +337,11 @@
 (define-rule inflist (list inflist inflist))
 
 (define-rule nat 'z (list 's nat))
-(define-rule zs (eps '()) (cons 'z tan))
+(define-rule zs (eps '()) (cons 'z zs))
+
+(define-rule digit '0 '1 '2 '3 '4 '5 '6 '7 '8 '9)
+
+(define-rule expr
+  digit
+  (list expr '+ expr)
+  (list expr '* expr))
