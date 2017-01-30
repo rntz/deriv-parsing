@@ -17,76 +17,77 @@
 (define-syntax-rule (while cond body ...)
   (let loop () (when cond body ... (loop))))
 
-;; this is rntz's updated code for define/fix
-;;
-;; TODO?: the evaluation strategy here could be smarter. this re-runs *every*
-;; node until all nodes in the computation "settle". but some nodes may settle
-;; early! so some sort of dirty/clean marking strategy might give benefits.
-;;
-;; but you know what they say about premature optimization.
-(define-syntax-rule (define/fix (f x)
-                      #:bottom bottom
-                      body ...)
-  (define f
-    (let ((cache     (make-weak-hasheq))
-          (changed?  (make-parameter 'error-changed)))
-      (lambda (x)
-        (define (compute-fixpoint)
-          (define visited (mutable-seteq))
-          ;; note: is *deliberately* named same thing as outer function. this is
-          ;; critical for recursive calls in (body ...) to work correctly.
-          (define (f x)
-            (define cached (hash-ref cache x (lambda () bottom)))
-            ;; if we've already visited this node, give cached value
-            (if (set-member? visited x) cached
-                (let ()
-                  (set-add! visited x)
-                  ;; this is where we actually run the user-supplied code for
-                  ;; the fix-point computation.
-                  (define new-val (begin body ...))
-                  (unless (equal? new-val cached)
-                    (changed? #t)
-                    (hash-set! cache x new-val))
-                  new-val)))
-          (f x))
-        (hash-ref! cache x compute-fixpoint)))))
-
-;; ;; ---------- this is might's original code, slightly reformatted ----------
-;; (define-syntax-rule (define/fix (f x) #:bottom bottom
+;; ;; this is rntz's updated code for define/fix
+;; ;;
+;; ;; TODO?: the evaluation strategy here could be smarter. this re-runs *every*
+;; ;; node until all nodes in the computation "settle". but some nodes may settle
+;; ;; early! so some sort of dirty/clean marking strategy might give benefits.
+;; ;;
+;; ;; but you know what they say about premature optimization.
+;; (define-syntax-rule (define/fix (f x)
+;;                       #:bottom bottom
 ;;                       body ...)
 ;;   (define f
 ;;     (let ((cache     (make-weak-hasheq))
-;;           (changed?  (make-parameter 'error-changed))
-;;           (running?  (make-parameter #f))
-;;           (visited   (make-parameter 'error-visited)))
+;;           (changed?  (make-parameter 'error-changed)))
 ;;       (lambda (x)
-;;         (let ((cached? (hash-has-key? cache x))
-;;               (cached  (hash-ref cache x (lambda () bottom)))
-;;               (run?    (running?)))
-;;           (cond
-;;             [(and cached? (not run?)) cached]
+;;         (define (compute-fixpoint)
+;;           (define visited (mutable-seteq))
+;;           ;; note: is *deliberately* named same thing as outer function. this is
+;;           ;; critical for recursive calls in (body ...) to work correctly.
+;;           (define (f x)
+;;             (define cached (hash-ref cache x (lambda () bottom)))
+;;             ;; if we've already visited this node, give cached value
+;;             (if (set-member? visited x) cached
+;;                 (let ()
+;;                   (set-add! visited x)
+;;                   ;; this is where we actually run the user-supplied code for
+;;                   ;; the fix-point computation.
+;;                   (define new-val (begin body ...))
+;;                   (unless (equal? new-val cached)
+;;                     (changed? #t)
+;;                     (hash-set! cache x new-val))
+;;                   new-val)))
+;;           ;; FIXME: does not recompute fixed point until unchanged!
+;;           (f x))
+;;         (hash-ref! cache x compute-fixpoint)))))
 
-;;             [(and run? (hash-has-key? (unbox (visited)) x))
-;;              (if cached? cached bottom)]
+;; ---------- this is might's original code, slightly reformatted ----------
+(define-syntax-rule (define/fix (f x) #:bottom bottom
+                      body ...)
+  (define f
+    (let ((cache     (make-weak-hasheq))
+          (changed?  (make-parameter 'error-changed))
+          (running?  (make-parameter #f))
+          (visited   (make-parameter 'error-visited)))
+      (lambda (x)
+        (let ((cached? (hash-has-key? cache x))
+              (cached  (hash-ref cache x (lambda () bottom)))
+              (run?    (running?)))
+          (cond
+            [(and cached? (not run?)) cached]
 
-;;             [run?
-;;              (hash-set! (unbox (visited)) x #t)
-;;              (let ((new-val (begin body ...)))
-;;                (when (not (equal? new-val cached))
-;;                  (set-box! (changed?) #t)
-;;                  (hash-set! cache x new-val))
-;;                new-val)]
+            [(and run? (hash-has-key? (unbox (visited)) x))
+             (if cached? cached bottom)]
 
-;;             [(and (not cached?) (not run?))
-;;              (parameterize ([running? #t]
-;;                             [changed? (box #t)]
-;;                             [visited (box (make-weak-hasheq))])
-;;                (let ([v bottom])
-;;                  (while (unbox (changed?))
-;;                    (set-box! (changed?) #f)
-;;                    (set-box! (visited) (make-weak-hasheq))
-;;                    (set! v (f x)))
-;;                  v))]))))))
+            [run?
+             (hash-set! (unbox (visited)) x #t)
+             (let ((new-val (begin body ...)))
+               (when (not (equal? new-val cached))
+                 (set-box! (changed?) #t)
+                 (hash-set! cache x new-val))
+               new-val)]
+
+            [(and (not cached?) (not run?))
+             (parameterize ([running? #t]
+                            [changed? (box #t)]
+                            [visited (box (make-weak-hasheq))])
+               (let ([v bottom])
+                 (while (unbox (changed?))
+                   (set-box! (changed?) #f)
+                   (set-box! (visited) (make-weak-hasheq))
+                   (set! v (f x)))
+                 v))]))))))
 
 ;; I want to know what Matt Might was smoking when he wrote this code. -rntz
 (define-syntax make-weak-hash-trie
@@ -397,6 +398,7 @@
     [(empty)       l]
     [(eps)         l]
     [(emptyp)      (empty)]
+    ;; is this line necessary? what happens if we remove it?
     [(nullp)       (eps* (parse-null l))]
     [(token p c)   l]
 

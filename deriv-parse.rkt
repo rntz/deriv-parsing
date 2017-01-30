@@ -2,15 +2,19 @@
 
 ;; This is my reimplementation of derivative parsing in Racket.
 
-(require "util.rkt") ;; TODO?: stop using this
+(require "util.rkt")
+(require "immutable-queue.rkt")
+(require "iterative-deepening.rkt")
 
 ;; ==================== Utilities ====================
 
+;; TODO: remove this in favor of Racket's standard logging stuff?
 (define debug? (make-parameter #f))
 (define-syntax-rule (debug body ...) (when (debug?) body ...))
 
 ;; delay/force are cool. what's even cooler is forcing delayed thunks by
-;; pattern-matching on them.
+;; pattern-matching on them. this makes pattern-matching side-effectful,
+;; however, so use with care.
 (require (rename-in racket/promise [delay real-delay]))
 (define-match-expander delay
   (syntax-parser [(_ p)      #'(? promise? (app force p))])
@@ -32,15 +36,10 @@
 ;;
 (define/contract (sets-product sets)
   (-> (listof set?) set?)
-  ;; we reverse the sets so that we don't have to reverse the accumulated list
-  ;; at the end.
-  (let loop ([sets (reverse sets)] [acc '()])
-    (match sets
-      ['() (set acc)]
-      [(cons s sets)
-       (sets-union
-        (for/list ([elem s])
-          (loop sets (cons elem acc))))])))
+  (for/fold ([tuples (set '())])
+            ([s (reverse sets)])
+    (for*/set ([x s] [xs tuples])
+      (cons x xs))))
 
 ;; This maps a function `f' across the cartesian product of a list of sets,
 ;; producing a set of results.
@@ -75,6 +74,9 @@
 
 ;; the empty parser is (p/union '())
 ;; the null parser is  (p/pure _)
+;;
+;; TODO: have explicit empty parser? and tighten constraint on p/union's
+;; arguments?
 
 ;; smart constructors, which perform some simplifications (but not complete
 ;; compaction) on-the-fly.
@@ -101,7 +103,8 @@
     [(list _ ... (? empty-parser?) _ ...) p-empty]
     ;; if all arguments are provided, call the function
     [(list (p/pure sets) ...) (p-pure (sets-map f sets))]
-    ;; function composition
+    ;; function composition.
+    ;; how necessary/useful is this "optimization"?
     [(list (p/apply g ps)) (p/apply (compose f g) ps)]
     [_ (p/apply f parsers)]))
 
@@ -160,6 +163,10 @@
 
 (require racket/splicing)
 
+;;; TODO FIXME: there's some bug involving user breaks during a call to a
+;;; memoized or fix-point function, that causes the exception to get re-raised
+;;; or something.
+
 ;; why is it "define/memo!", you ask, and not simply "define/memo"?
 ;; because it has a side effect! for example,
 ;;
@@ -207,8 +214,10 @@
 
 (define-syntax-rule (define/fix (f x) #:bottom bottom body ...)
   (splicing-let ([cache     (make-weak-hasheq)]
+                 ;; FIXME: what is this used for?
                  [changed?  (make-parameter 'error-changed)])
    (define (f x)
+     ;; TODO: hoist this out of f.
      (define (compute-fixpoint)
        (define visited (mutable-seteq))
        ;; note: is *deliberately* named same thing as outer function. this is
@@ -224,7 +233,10 @@
                  (changed? #t)
                  (hash-set! cache x new-val))
                new-val)))
-       (f x))
+       (let loop ()
+         (parameterize ([changed? #f])
+           (define result (f x))
+           (if (changed?) (loop) result))))
      (hash-ref! cache x compute-fixpoint))))
 
 
@@ -256,9 +268,16 @@
     [(p/union ps)   (andmap is-empty? ps)]
     [(p/apply f ps) (ormap is-empty? ps)]))
 
+;; uses is-empty?
+;;
+;; TODO: double check that this implements all the compactions in the new
+;; derivative parsing paper, the one with the proof of O(n^3) worst-case
+;; performance.
 (define/memo! (compact p)
   (match p
     [(? is-empty?)      p-empty]
+    ;; TODO: is this right? explain why it's okay not to force here. maybe
+    ;; it's because we already called is-empty?
     [(? promise?)       (delay (compact (force p)))]
     [(p/pure _)         p]
     [(p/tok _)          p]
@@ -269,6 +288,7 @@
 (define/memo! (derive c p)
   (match p
     ;; this delay is critical to avoid infinite looping.
+    ;; WHY? what's an example?
     [(? promise?)   (delay (derive c (force p)))]
     [(p/pure _)     p-empty]
     [(p/tok (== c)) (p-eps c)]
@@ -300,16 +320,16 @@
      (define nexts (if (null? tail) head (cons (car tail) head)))
      (sets-union (map next-tokens nexts))]))
 
+
+;; =============== Running parsers ===============
+(define (parse p toks) (parse-null (derive* toks p)))
+(define (derive* toks p)
+  (for/fold ([p p]) ([tok toks])
+    (derive tok (compact p))))
+
 (define (derive-hash p)
   (for/hash ([c (next-tokens p)])
     (values c (derive c p))))
-
-
-;; =============== Running parsers ===============
-(define (parse p toks)
-  (match toks
-    ['() (parse-null p)]
-    [(cons tok toks) (parse (derive tok p) toks)]))
 
 
 ;; =============== Reverse parsing ===============
@@ -320,31 +340,90 @@
 (struct trie (parses children) #:transparent)
 
 (define (parser->trie p)
+  (set! p (compact p))
   (trie (parse-null p)
         (for/hash ([(tok next) (derive-hash p)])
           (values tok (delay (parser->trie next))))))
 
 ;; forces a trie to the given depth.
+;; #f means "force it all the way".
 ;; pun unintentional, I swear. really! you don't believe me?!
 (define (trie-force t #:depth [depth #f])
-  (if (equal? depth 0) t
-      (match-let ([(trie parses children) (force t)])
-        (trie parses
-              (for/hash ([(tok next) children])
-                (values tok
-                        (trie-force next #:depth (and depth (- depth 1)))))))))
+  (match depth
+    [0 t]
+    [_
+     (match-define (trie parses children) (force t))
+     (trie parses
+           (for/hash ([(tok next) children])
+             (values tok
+                     (trie-force next #:depth (and depth (- depth 1))))))]))
+;;
+;; uses iterated deepening to avoid problems with asymptotically huge space
+;; usage, while imposing only an asymptotically negligible time overhead.
+;; TODO: be more precise about the asymptotics.
+;;
+;; TODO: construct an example where /not/ using iterated deepening produces
+;; memory issues.
+;;
+;; FIXME: (stream->list (all-parses digit)) infloops
+;; (define (all-parses p)
+;;   (define (deepen n p rev-toks)
+;;     (set! p (compact p))
+;;     (match n
+;;       [0 (define parses (parse-null p))
+;;          (if (set-empty? parses) '()
+;;              (list (list (reverse rev-toks) parses)))]
+;;       [_ (let*/stream ([(tok next-p) (derive-hash p)])
+;;            (deepen (- n 1) next-p (cons tok rev-toks)))]))
+;;   ;; HERP, this doesn't know when to stop deepening!
+;;   (let*/stream ([n (in-naturals)])
+;;     (deepen n p '())))
 
-;; generates a stream of (token-list . set-of-parses) pairs.
-(define (all-parses p)
-  (let loop ([p p] [rev-tokens '()])
-    (define (next)
-      (streams-interleave
-       (for/list ([(tok next) (derive-hash p)])
-         (loop next (cons tok rev-tokens)))))
+;; produces a lazy tree of (token-list set-of-parses) values.
+;;
+;; TODO: are there optimizations I can apply here? to avoid empty internal
+;; nodes, for example?
+(define (parser->lazytree parser)
+  (let parser->lazytree ([p parser] [rev-toks '()])
+    (set! p (compact p))
     (define parses (parse-null p))
-    (if (set-empty? parses)
-        (next)
-        (stream-cons (cons (reverse rev-tokens) parses) (next)))))
+    (lazytree
+     (list (list (reverse rev-toks) parses))
+     (for/list ([(tok next-p) (derive-hash p)])
+       (parser->lazytree next-p (cons tok rev-toks))))))
+
+(define (in-parses parser)
+  (sequence-filter
+   (match-lambda [(list toks parse-set) (not (set-empty? parse-set))])
+   (in-lazytree (parser->lazytree parser))))
+
+(define (in-grammar parser) (sequence-map first (in-parses parser)))
+(define (all-terms p) (sequence->stream (in-grammar p)))
+(define (all-parses p) (sequence->stream (in-parses p)))
+
+;; old version. would be cool if this could be defined as:
+;; (define (all-parses p) (trie->stream (parser->trie p)))
+
+;; generates a stream of (token-list set-of-parses) elements.
+;;
+;; TODO: Can this ever fail to create a productive stream? I think it probably
+;; can, but only if the grammar is unproductive. Even then, compaction and
+;; empty-testing probably save us often. But it seems unlikely they can always
+;; save us.
+(define (all-parses-old p)
+  (let work ([q (list->queue (list (list p '())))])
+    (if (queue-empty? q) empty-stream
+        (let-values ([(q x) (dequeue q)])
+          (match-define (list p rev-toks) x)
+          (set! p (compact p))
+          (define parses (parse-null p))
+          ;; push successors onto the queue
+          (set! q (for/fold ([q q])
+                            ([(tok p-next) (derive-hash p)])
+                    (enqueue q `(,p-next (,tok ,@rev-toks)))))
+          (if (set-empty? parses)
+              (work q)
+              (stream-cons `(,(reverse rev-toks) ,parses) (work q)))))))
 
 
 ;; =============== Test cases ===============
@@ -352,6 +431,7 @@
 (define-rule infsum infsum infsum)
 (define-rule inflist (list inflist inflist))
 
+;; FIXME: (all-parses nat) does not work
 (define-rule nat 'z (list 's nat))
 (define-rule zs (eps '()) (cons 'z zs))
 
@@ -361,3 +441,16 @@
   digit
   (list expr '+ expr)
   (list expr '* expr))
+
+(define (generate n-examples parser)
+  (map car (stream-take n-examples (all-parses parser))))
+
+(module+ test
+  (println (stream->list (all-parses digit)))
+
+  ;; TODO: test submodule with actual tests!
+  (println (parse nat '(z)))
+  (println (parse nat '(s s z)))
+
+  (println (stream-take 4 (all-parses nat)))
+  )

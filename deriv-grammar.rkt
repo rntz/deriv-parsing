@@ -205,6 +205,9 @@
 ;; To implement: Inlining parsers that are only referenced once; inlining
 ;; parsers which immediately refer to another parser.
 ;;
+;; It's not clear that this suffices to implement compaction, as compaction also
+;; involves checking whether things are epsilon, etc.
+;;
 ;; Should separate compaction from pruning. Pruning involves a chosen set of
 ;; "root references" (helloooo garbage collection), which can't be pruned.
 ;; Compaction doesn't.
