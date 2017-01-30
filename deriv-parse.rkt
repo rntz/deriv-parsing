@@ -4,7 +4,7 @@
 
 (require "util.rkt")
 (require "immutable-queue.rkt")
-(require "iterative-deepening.rkt")
+(require "lazytree.rkt")
 
 ;; ==================== Utilities ====================
 
@@ -166,6 +166,8 @@
 ;;; TODO FIXME: there's some bug involving user breaks during a call to a
 ;;; memoized or fix-point function, that causes the exception to get re-raised
 ;;; or something.
+;;;
+;;; actually, it might be sequence->stream that's causing the problem?
 
 ;; why is it "define/memo!", you ask, and not simply "define/memo"?
 ;; because it has a side effect! for example,
@@ -226,6 +228,9 @@
          (define cached (hash-ref cache x (lambda () bottom)))
          ;; if we've already visited this node, give cached value
          (if (set-add?! visited x) cached
+             ;; FIXME: what should we do if an error (eg Ctrl-C) happens here?
+             ;; I guess what we really want is a transaction...
+
              ;; this is where we actually run the user-supplied code for the
              ;; fix-point computation.
              (let ([new-val (begin body ...)])

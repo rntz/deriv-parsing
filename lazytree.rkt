@@ -1,5 +1,8 @@
 #lang racket
 
+;; Provides lazy trees, an interface supporting enumeration by iterative
+;; deepening.
+
 (provide lazytree? lazytree/c lazytree
          empty-lazytree lazyleaf lazynode
          in-lazytree lazytree->list lazytree->stream
@@ -7,11 +10,11 @@
 
 (require "util.rkt")
 
-;; a lazytree is a thunk that returns (values elems children)
+;; A lazytree is a thunk that returns (values elems children)
 ;; - elems is a stream of values
 ;; - children is a list of child trees
 ;;
-;; a thunk is a 0-argument function, NOT a promise. promises remember their
+;; A thunk is a 0-argument function, NOT a promise. Promises remember their
 ;; values when they're forced, which is the opposite of what we want for
 ;; iterative deepening.
 (define lazytree? procedure?)
@@ -37,7 +40,7 @@
 (define (lazytree->list tree)   (sequence->list (in-lazytree tree)))
 (define (lazytree->stream tree) (sequence->stream (in-lazytree tree)))
 
-;; uses iterative deepening.
+;; The iterative deepening.
 (define (in-lazytree tree)
   (in-generator
    (let loop ([depth 0])
@@ -71,10 +74,15 @@
 
 
 (module+ test
-  ;; TODO real tests
+  (require rackunit)
+
   (define nats
     (let loop ([i 0])
       (lazytree (list i) (list (loop (+ 1 i))))))
+
+  (check-equal?
+   '(0 1 2 3 4 5 6 7 8 9)
+   (stream-take 10 (lazytree->stream nats)))
 
   (define nats-or-hello
     (lazynode nats (lazyleaf 'hello))))
