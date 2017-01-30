@@ -57,19 +57,21 @@
           (consume)]
          [_ (error "generator in impossible state")])))))
 
-;; meant to be run inside a generator.
-;;
-;; yields lists of elements in `tree' at `depth', then returns #t if `tree' has
-;; no subtrees left to be explored below `depth'.
+;; Runs inside a generator. yields streams of elements in `tree' at `depth',
+;; then returns #t if `tree' has no subtrees left to be explored below `depth'.
 (define (explore depth tree)
   (define-values (elems children) (tree))
   (match depth
     [0 (yield elems)
        (null? children)]
+    ;; [_ (define done #t)
+    ;;    (for ([c children])
+    ;;      (unless (explore (- depth 1) c) (set! done #f)))
+    ;;    done]
     [_ (for/fold ([done #t]) ([c children])
-         ;; NB. It is extremely critical that the first argument to (and) be the
-         ;; call to (explore), because (explore) is side-effectful, and we wish
-         ;; to run it even if `done' is #t!
+         ;; NB. It is critical that the first argument to (and) be the call to
+         ;; (explore), because (explore) is side-effectful, and we wish to run
+         ;; it even if `done' is #t!
          (and (explore (- depth 1) c) done))]))
 
 
