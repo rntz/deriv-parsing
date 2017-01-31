@@ -3,7 +3,6 @@
 ;; This is my reimplementation of derivative parsing in Racket.
 
 (require "util.rkt")
-(require "immutable-queue.rkt")
 (require "lazytree.rkt")
 
 ;; ==================== Utilities ====================
@@ -113,8 +112,8 @@
 (define (p-or . ps) (p-union ps))
 (define (p-map f . parsers) (p-apply f parsers))
 
-(define (p-first p . ps) (p-apply first (cons p ps)))
-(define (p-last p . ps) (p-apply last (cons p ps)))
+(define (p-first p . ps) (p-apply (lambda xs (first xs)) (cons p ps)))
+(define (p-last p . ps) (p-apply (lambda xs (last xs)) (cons p ps)))
 (define (p-list . ps) (p-apply list ps))
 
 
@@ -129,7 +128,7 @@
 ;; TODO: let-syntax. x:expr syntax? ==> syntax?
 (define-for-syntax lang-parse
   (syntax-parser
-    #:datum-literals (pure eps quote ? empty fix escape -->)
+    #:datum-literals (pure eps quote ? empty fix escape --> =>)
     #:literals (begin0 begin or)
     [e:id                   #'e]
     ;; recursive parsers. see fix/delay, below.
@@ -149,6 +148,7 @@
     ;; function application.
     [(f:id p ...)           #'(p-map f (lang p) ...)]
     [(p ... --> f)          #'(p-map f (lang p) ...)]
+    [(p ... => e)           #'(p-map (const e) (lang p) ...)]
     ;; escape hatch
     [(escape e)             #'e]))
 
@@ -340,54 +340,15 @@
 ;; =============== Reverse parsing ===============
 ;; That is: generating strings from parsers!
 
-;; A trie's `parses' is a set of its null parses.
-;; A trie's `children' is a hash from tokens to promises that deliver tries.
-(struct trie (parses children) #:transparent)
-
-(define (parser->trie p)
-  (set! p (compact p))
-  (trie (parse-null p)
-        (for/hash ([(tok next) (derive-hash p)])
-          (values tok (delay (parser->trie next))))))
-
-;; forces a trie to the given depth.
-;; #f means "force it all the way".
-;; pun unintentional, I swear. really! you don't believe me?!
-(define (trie-force t #:depth [depth #f])
-  (match depth
-    [0 t]
-    [_
-     (match-define (trie parses children) (force t))
-     (trie parses
-           (for/hash ([(tok next) children])
-             (values tok
-                     (trie-force next #:depth (and depth (- depth 1))))))]))
-;;
-;; uses iterated deepening to avoid problems with asymptotically huge space
-;; usage, while imposing only an asymptotically negligible time overhead.
-;; TODO: be more precise about the asymptotics.
-;;
-;; TODO: construct an example where /not/ using iterated deepening produces
-;; memory issues.
-;;
-;; FIXME: (stream->list (all-parses digit)) infloops
-;; (define (all-parses p)
-;;   (define (deepen n p rev-toks)
-;;     (set! p (compact p))
-;;     (match n
-;;       [0 (define parses (parse-null p))
-;;          (if (set-empty? parses) '()
-;;              (list (list (reverse rev-toks) parses)))]
-;;       [_ (let*/stream ([(tok next-p) (derive-hash p)])
-;;            (deepen (- n 1) next-p (cons tok rev-toks)))]))
-;;   ;; HERP, this doesn't know when to stop deepening!
-;;   (let*/stream ([n (in-naturals)])
-;;     (deepen n p '())))
-
-;; produces a lazy tree of (token-list set-of-parses) values.
+;; Generates a lazy tree of (token-list set-of-parses) values.
 ;;
 ;; TODO: are there optimizations I can apply here? to avoid empty internal
 ;; nodes, for example?
+;;
+;; TODO: Can this ever fail to create a productive stream? I think it probably
+;; can, but only if the grammar is unproductive. Even then, compaction and
+;; empty-testing probably save us often. But it seems unlikely they can always
+;; save us.
 (define (parser->lazytree parser)
   (let parser->lazytree ([p parser] [rev-toks '()])
     (set! p (compact p))
@@ -397,24 +358,30 @@
      (for/list ([(tok next-p) (derive-hash p)])
        (parser->lazytree next-p (cons tok rev-toks))))))
 
+;; Generates a sequence of (token-list set-of-parses) elements.
+;;
+;; Note that in-lazytree uses iterated deepening. This avoids problems with
+;; asymptotically huge space usage, while imposing only an asymptotically
+;; negligible time overhead. TODO: be more precise about the asymptotics.
+;;
+;; TODO: construct an example where /not/ using iterated deepening produces
+;; memory issues.
 (define (in-parses parser)
   (sequence-filter
    (match-lambda [(list toks parse-set) (not (set-empty? parse-set))])
    (in-lazytree (parser->lazytree parser))))
 
 (define (in-grammar parser) (sequence-map first (in-parses parser)))
+
+;; Generates a stream of all token-lists which have a valid parse.
 (define (all-terms p) (sequence->stream (in-grammar p)))
+
+;; Generates a stream of (token-list set-of-parses) elements.
 (define (all-parses p) (sequence->stream (in-parses p)))
 
-;; old version. would be cool if this could be defined as:
-;; (define (all-parses p) (trie->stream (parser->trie p)))
-
-;; generates a stream of (token-list set-of-parses) elements.
-;;
-;; TODO: Can this ever fail to create a productive stream? I think it probably
-;; can, but only if the grammar is unproductive. Even then, compaction and
-;; empty-testing probably save us often. But it seems unlikely they can always
-;; save us.
+;; Old version, using an explicit work queue.
+#;(require "immutable-queue.rkt")
+#;
 (define (all-parses-old p)
   (let work ([q (list->queue (list (list p '())))])
     (if (queue-empty? q) empty-stream
@@ -436,26 +403,38 @@
 (define-rule infsum infsum infsum)
 (define-rule inflist (list inflist inflist))
 
-;; FIXME: (all-parses nat) does not work
 (define-rule nat 'z (list 's nat))
 (define-rule zs (eps '()) (cons 'z zs))
 
+(define-rule nat-num
+  ('z --> (const 0))
+  ((begin 's nat-num) --> (curry + 1)))
+
 (define-rule digit '0 '1 '2 '3 '4 '5 '6 '7 '8 '9)
 
+(define-rule var 'x 'y 'z)
+
 (define-rule expr
-  digit
+  var
   (list expr '+ expr)
   (list expr '* expr))
 
 (define (generate n-examples parser)
-  (map car (stream-take n-examples (all-parses parser))))
+  (stream-take n-examples (all-terms parser)))
+
+;; TODO: (generate 1000 expr) is slooooooow. fix this!
 
 (module+ test
-  (println (stream->list (all-parses digit)))
+  (require rackunit)
 
-  ;; TODO: test submodule with actual tests!
-  (println (parse nat '(z)))
-  (println (parse nat '(s s z)))
+  (test-case "nat"
+    (check-equal? (set 'z) (parse nat '(z)))
+    (check-equal? (set '(s (s z))) (parse nat '(s s z)))
+    (check-equal?
+     '((z) (s z) (s s z))
+     (stream-take 3 (all-terms nat))))
 
-  (println (stream-take 4 (all-parses nat)))
+  (test-case "digit"
+   (check-equal? (for/set ([i 10]) (list i))
+                 (sequence->set (all-terms digit))))
   )
