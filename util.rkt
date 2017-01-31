@@ -182,8 +182,11 @@
          let*/stream)
 
 (define (stream-take n s)
-  (for/list ([x (in-stream s)]
-             [_ (in-range n)])
+  ;; NB. order of clauses is important, otherwise we attempt to take one more
+  ;; element from `s` than is necessary, which can lead to infinite loops if `s`
+  ;; is unproductive after `n` elements.
+  (for/list ([_ (in-range n)]
+             [x (in-stream s)])
     x))
 
 (define (stream-append-lazy stream stream-thunk)
