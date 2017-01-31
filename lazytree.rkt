@@ -40,51 +40,51 @@
 (define (lazytree->list tree)   (sequence->list (in-lazytree tree)))
 (define (lazytree->stream tree) (sequence->stream (in-lazytree tree)))
 
-;; The iterative deepening.
+;; Iterative deepening.
 (define (in-lazytree tree)
   (in-generator
    (let loop ([depth 0])
-     (define g (generator () (explore depth tree)))
-     (let consume ()
-       (define x (g))
-       (match (generator-state g)
-         ['done
-          ;; `x` is #t iff we are done.
-          (unless x (loop (+ depth 1)))]
-         ['suspended
-          ;; `x` is a list of elements.
-          (for ([elem x]) (yield elem))
-          (consume)]
-         [_ (error "generator in impossible state")])))))
+     (when (explore depth tree)
+       (loop (+ depth 1))))))
 
-;; Runs inside a generator. yields streams of elements in `tree' at `depth',
-;; then returns #t if `tree' has no subtrees left to be explored below `depth'.
+;; Runs inside a generator. yields elements in `tree' at `depth', then returns
+;; #t if `tree' has subtrees left to be explored below `depth'.
 (define (explore depth tree)
   (define-values (elems children) (tree))
   (match depth
-    [0 (yield elems)
-       (null? children)]
-    ;; [_ (define done #t)
-    ;;    (for ([c children])
-    ;;      (unless (explore (- depth 1) c) (set! done #f)))
-    ;;    done]
-    [_ (for/fold ([done #t]) ([c children])
-         ;; NB. It is critical that the first argument to (and) be the call to
-         ;; (explore), because (explore) is side-effectful, and we wish to run
-         ;; it even if `done' is #t!
-         (and (explore (- depth 1) c) done))]))
+    [0 (for ([e elems]) (yield e))
+       (not (null? children))]
+    [_ (define continue #f)
+       (for ([c children])
+         (when (explore (- depth 1) c)
+           (set! continue #t)))
+       continue]))
 
 
 (module+ test
-  (require rackunit)
+  (require rackunit "timeout.rkt")
 
   (define nats
     (let loop ([i 0])
       (lazytree (list i) (list (loop (+ 1 i))))))
-
   (check-equal?
    '(0 1 2 3 4 5 6 7 8 9)
    (stream-take 10 (lazytree->stream nats)))
 
+  (define ab-leaf (lazyleaf 'a 'b))
+  (define ab-node (lazynode (lazyleaf 'a) (lazyleaf 'b)))
+  (check-equal? '(a b) (lazytree->list ab-leaf))
+  (check-equal? '(a b) (lazytree->list ab-node))
+
   (define nats-or-hello
-    (lazynode nats (lazyleaf 'hello))))
+    (lazynode nats (lazyleaf 'hello)))
+  (define hello (stream-take 10 (lazytree->stream nats-or-hello)))
+  (check-not-false (member 'hello hello))
+
+  (define infloop (lazytree '() (list infloop)))
+  (define joy-or-infloop (lazynode infloop (lazyleaf 'joy)))
+  (check-equal? '(joy)
+                (with-timeout 1
+                  (stream-take 1 (lazytree->stream joy-or-infloop))))
+
+  )
